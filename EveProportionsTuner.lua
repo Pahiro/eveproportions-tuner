@@ -104,6 +104,28 @@ local function live(value)
     return ok and result == true
 end
 
+-- FText() needs the native FText constructor, which UE4SS finds by AOB scan.
+-- On some installs the scan fails ("[PS] Failed to find FText::FText" in
+-- UE4SS.log) and constructing one crashes the game. Fall back to
+-- KismetTextLibrary::Conv_StringToText, which is a plain UFunction call and
+-- doesn't need the scan. The proper fix is UE4SS_Signatures/FText_Constructor.lua
+-- (bundled with this mod), but degrade to blank text rather than crash.
+local textConv = nil
+local function makeText(s)
+    local ok, txt = pcall(FText, s)
+    if ok and txt ~= nil then return txt end
+    if textConv == nil then
+        pcall(function()
+            textConv = StaticFindObject("/Script/Engine.Default__KismetTextLibrary")
+        end)
+    end
+    if live(textConv) then
+        local ok2, txt2 = pcall(function() return textConv:Conv_StringToText(s) end)
+        if ok2 and txt2 ~= nil then return txt2 end
+    end
+    return nil
+end
+
 -- ---------------------------------------------------------------------------
 -- Settings persistence
 -- ---------------------------------------------------------------------------
@@ -640,10 +662,12 @@ local function ensureWidget()
         end)
         pcall(function() hint.Font.Size = 16 end)
         pcall(function() hint:SetAutoWrapText(true) end)
-        hint:SetText(FText(
+        local hintText = makeText(
             "Left/Right arrows: fine-tune last slider\n" ..
             "1-9: load preset    Shift+1-9: save preset\n" ..
-            "0: bind to worn outfit    Shift+0: unbind"))
+            "0: bind to worn outfit    Shift+0: unbind")
+        if hintText == nil then return end
+        hint:SetText(hintText)
         local slot = vbox:AddChildToVerticalBox(hint)
         pcall(function() slot.Padding.Top = 10.0 end)
         log("shortcut hints added")
@@ -668,7 +692,8 @@ local function updateLabel(widget, group)
     local label = findChild(widget, "Label_" .. group)
     if label == nil then return end
     pcall(function()
-        label:SetText(FText(string.format("%s  %.2f", DISPLAY[group] or group, settings[group])))
+        local txt = makeText(string.format("%s  %.2f", DISPLAY[group] or group, settings[group]))
+        if txt ~= nil then label:SetText(txt) end
     end)
 end
 

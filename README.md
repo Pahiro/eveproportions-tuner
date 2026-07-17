@@ -37,11 +37,34 @@ bones turn out to be a clean butt-size control.
 | `main.lua.patch` | 5-line diff against the original `main.lua` (3 integration points, see below). |
 | `main.lua` | Full patched copy, if you prefer that over applying the patch. |
 | `EveProportionsConfig.lua` | Config with two new keys: `EnableTuner` (default `true`) and `TunerKey` (default `"F7"`). |
+| `UE4SS_Signatures/FText_Constructor.lua` | AOB signature for the FText constructor — copy to `ue4ss/UE4SS_Signatures/`. See below. |
 
 `Scripts/TunerValues.lua`, `Scripts/TunerPresets.lua`, and
 `Scripts/TunerOutfits.lua` are created at runtime next to the scripts to
 store the user's values, presets, and outfit bindings (all safe to delete;
 they regenerate with defaults).
+
+## If pressing F7 crashes the game (FText signature)
+
+UE4SS finds the native `FText` constructor by AOB scan, and on Stellar Blade
+the stock UE4SS 3.0.1 scan **fails** — `UE4SS.log` shows:
+
+```
+[PS] Failed to find FText::FText(FString&&): expected at least one value
+[PS] You can supply your own AOB in 'UE4SS_Signatures/FText_Constructor.lua'
+```
+
+Without it, constructing an `FText` from Lua (the tuner does this for slider
+labels) can crash the game the moment the panel opens. Fix: copy
+`UE4SS_Signatures/FText_Constructor.lua` from this repo into
+`SB/Binaries/Win64/ue4ss/UE4SS_Signatures/` (create the folder if needed).
+When it works, `UE4SS.log` shows `FText::FText address: ... <- Lua Script`
+instead of the failure.
+
+As of v1.1.1 the tuner also routes text through a helper that falls back to
+`KismetTextLibrary::Conv_StringToText` (a plain UFunction call, no scan
+needed) when `FText()` fails cleanly — but the signature file is the reliable
+fix, so install it either way.
 
 ## Integration points in main.lua
 
