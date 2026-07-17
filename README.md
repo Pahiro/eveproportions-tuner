@@ -6,6 +6,7 @@ dormant — pure layout, no blueprint logic) appears with 8 working sliders.
 Values apply live to the post-process AnimBP, persist across sessions, and
 re-apply automatically on outfit changes. **No pak changes are needed** —
 everything runs through UE4SS Lua against the existing assets.
+<img width="232" height="436" alt="image" src="https://github.com/user-attachments/assets/26fca8a7-389f-4f05-bc0e-0987b5366b12" />
 
 While the panel is open:
 
