@@ -7,6 +7,26 @@ Values apply live to the post-process AnimBP, persist across sessions, and
 re-apply automatically on outfit changes. **No pak changes are needed** —
 everything runs through UE4SS Lua against the existing assets.
 
+While the panel is open:
+
+| Key | Action |
+|---|---|
+| Left/Right arrows | fine-tune the last-touched slider (step configurable) |
+| 1–9 / Shift+1–9 | load / save preset slot (`TunerPresets.lua`) |
+| 0 / Shift+0 | bind / unbind current values to the worn outfit (`TunerOutfits.lua`) |
+
+Outfit bindings are keyed by the body mesh asset path (works for CNS custom
+outfits too): a bound outfit adopts its own values whenever it's equipped,
+and switching to an unbound outfit restores the saved defaults. A shortcut
+legend is appended to the panel at runtime (a `TextBlock` constructed via
+`StaticConstructObject` and added to the widget's VBox — again, no pak edit).
+
+Slider labels are renamed at runtime to match their observed in-game effect
+(the `DISPLAY` map), and `B_Bip001_Pelvis` was dropped from the Hip group:
+scaling it scales the entire skeleton from the pelvis origin (a duplicate of
+Size that sinks the feet into the ground). Without it, the group's `Hip_Reg`
+bones turn out to be a clean butt-size control.
+
 ## Files
 
 | File | What it is |
@@ -16,8 +36,10 @@ everything runs through UE4SS Lua against the existing assets.
 | `main.lua` | Full patched copy, if you prefer that over applying the patch. |
 | `EveProportionsConfig.lua` | Config with two new keys: `EnableTuner` (default `true`) and `TunerKey` (default `"F7"`). |
 
-`Scripts/TunerValues.lua` is created at runtime next to the scripts to store
-the user's slider values (safe to delete; regenerates with defaults).
+`Scripts/TunerValues.lua`, `Scripts/TunerPresets.lua`, and
+`Scripts/TunerOutfits.lua` are created at runtime next to the scripts to
+store the user's values, presets, and outfit bindings (all safe to delete;
+they regenerate with defaults).
 
 ## Integration points in main.lua
 
@@ -56,7 +78,11 @@ paths (e.g. level load). Deliberately **not** a polling loop — a 1 s
   widget class is loaded via `AssetRegistryHelpers:GetAsset()` like
   BPModLoader does.
 - `USlider` drags never write back the `Value` UPROPERTY — live values must
-  come from `GetValue()`.
+  come from `GetValue()`. The reverse also bites: `SetValue()` on a live
+  widget doesn't reliably move the Slate handle, so programmatic writes
+  (reset, preset load) verify with a readback and rebuild the widget on
+  mismatch — construction initializes Slate from values set before
+  `AddToViewport`, which always works.
 - The game keeps stealing input mode while the panel is open, so
   `SetInputMode_UIOnlyEx` is re-asserted every poll tick (80 ms, only while
   the panel is visible; zero background cost when hidden).

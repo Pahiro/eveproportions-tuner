@@ -13,18 +13,29 @@
 --   Translation' = authored * value
 --   Rotation'    = authored * value
 -- Values persist to TunerValues.lua next to this script.
+--
+-- Keys while the panel is open:
+--   Left/Right arrows   nudge the last-touched slider by FineTuneStep
+--   1..9                load preset slot        Shift+1..9  save preset slot
+--   0                   bind current values to the worn outfit
+--   Shift+0             remove the worn outfit's binding
+-- Presets live in TunerPresets.lua; outfit bindings (keyed by the body
+-- mesh asset path) in TunerOutfits.lua. A bound outfit adopts its values
+-- whenever it is equipped, and slider edits made while wearing it save to
+-- the binding instead of the global TunerValues defaults.
 
 local UEHelpers = require("UEHelpers")
 
 local Tuner = {}
 
-local CONFIG = { EnableTuner = true, TunerKey = "F7", DebugLogging = false }
+local CONFIG = { EnableTuner = true, TunerKey = "F7", DebugLogging = false, FineTuneStep = 0.01 }
 pcall(function()
     local supplied = require("EveProportionsConfig")
     if type(supplied) == "table" then
         if supplied.EnableTuner ~= nil then CONFIG.EnableTuner = supplied.EnableTuner == true end
         if type(supplied.TunerKey) == "string" then CONFIG.TunerKey = supplied.TunerKey end
         if supplied.DebugLogging ~= nil then CONFIG.DebugLogging = supplied.DebugLogging == true end
+        if tonumber(supplied.FineTuneStep) ~= nil then CONFIG.FineTuneStep = tonumber(supplied.FineTuneStep) end
     end
 end)
 
@@ -46,13 +57,19 @@ local ABP_MARKER = "ABP_EveProportions_C"
 local ABP_CLASS_PATH = "/Game/Mods/EveProportions/ABP_EveProportions.ABP_EveProportions_C"
 
 -- Slider name (widget child) -> ABP node property names it drives.
+-- Keys must match the cooked widget's child names (Slider_<key>/Label_<key>);
+-- DISPLAY below holds what the label actually shows. In-game effects per
+-- observation 2026-07-17.
 local GROUPS = {
-    Size = { "B_Root" },
+    Size = { "B_Root" }, -- whole body, feet stay grounded
     Breast = { "B_Dm_L_Breast_Point", "B_Dm_R_Breast_Point" },
+    -- Subtle: top-of-breast fullness only.
     FacBreast = { "B_Ab_L_Pectro0", "B_Ab_L_Pectro1", "B_Ab_R_Pectro0", "B_Ab_R_Pectro1" },
-    Hip = { "B_Bip001_Pelvis", "B_Ab_L_Hip_Reg", "B_Ab_R_Hip_Reg" },
-    Waist = { "B_Ab_L_Venter", "B_Ab_R_Venter" },
-    Belly = { "B_Ab_L_Venter2", "B_Ab_R_Venter2" },
+    -- Hip_Reg = butt. B_Bip001_Pelvis removed: it scaled the whole skeleton
+    -- from the pelvis origin (duplicate of Size, but the feet sink).
+    Hip = { "B_Ab_L_Hip_Reg", "B_Ab_R_Hip_Reg" },
+    Waist = { "B_Ab_L_Venter", "B_Ab_R_Venter" }, -- front hip bone area
+    Belly = { "B_Ab_L_Venter2", "B_Ab_R_Venter2" }, -- reads as hips in game
     Thigh = {
         "B_Ab_L_Thigh_Tw0", "B_Ab_L_Thigh_Tw1", "B_Ab_L_Knee",
         "B_Ab_L_Calf_Tw0", "B_Ab_L_Calf_Tw1",
@@ -67,6 +84,19 @@ local GROUPS = {
     },
 }
 local GROUP_ORDER = { "Size", "Breast", "FacBreast", "Hip", "Waist", "Belly", "Thigh", "FacBody" }
+
+-- What the panel labels display for each group (internal keys and saved
+-- TunerValues.lua keys are unchanged).
+local DISPLAY = {
+    Size = "Size",
+    Breast = "Breast",
+    FacBreast = "Bust Top",
+    Hip = "Butt",
+    Waist = "Front Hip",
+    Belly = "Hips",
+    Thigh = "Legs",
+    FacBody = "Arms",
+}
 
 local function live(value)
     if value == nil then return false end
@@ -84,40 +114,125 @@ pcall(function()
     scriptDir = source:gsub("[\\/][^\\/]+$", "")
 end)
 
-local settings = {}
-for _, name in ipairs(GROUP_ORDER) do settings[name] = 1.0 end
+-- Copy only known groups, clamped to sane bounds; missing groups become 1.0.
+local function snapshot(values)
+    local copy = {}
+    for _, name in ipairs(GROUP_ORDER) do
+        local v = tonumber(values and values[name])
+        copy[name] = v ~= nil and math.max(0.0, math.min(5.0, v)) or 1.0
+    end
+    return copy
+end
 
-local function savePath()
+local settings = snapshot(nil)        -- values currently applied/shown
+local defaultSettings = snapshot(nil) -- last saved non-outfit values
+local presets = {}                    -- slot (1..9) -> values table
+local outfits = {}                    -- body mesh full name -> values table
+local currentOutfitKey = nil          -- mesh key of the last adopted instance
+local adopted = false                 -- true while settings came from an outfit binding
+
+local function filePath(name)
     if scriptDir == nil then return nil end
-    return scriptDir .. "/TunerValues.lua"
+    return scriptDir .. "/" .. name
+end
+
+local function loadTable(name)
+    local path = filePath(name)
+    if path == nil then return nil end
+    local ok, chunk = pcall(loadfile, path)
+    if not ok or chunk == nil then return nil end
+    local ran, saved = pcall(chunk)
+    if ran and type(saved) == "table" then return saved end
+    return nil
+end
+
+local function writeValues(file, values, indent)
+    for _, name in ipairs(GROUP_ORDER) do
+        file:write(string.format("%s%s = %.4f,\n", indent, name, values[name] or 1.0))
+    end
+end
+
+local function openSaveFile(name)
+    local path = filePath(name)
+    if path == nil then return nil end
+    local file = io.open(path, "w")
+    if file == nil then log("cannot write " .. path) end
+    return file
 end
 
 local function loadSettings()
-    local path = savePath()
-    if path == nil then return end
-    local ok, chunk = pcall(loadfile, path)
-    if not ok or chunk == nil then return end
-    local ran, saved = pcall(chunk)
-    if not ran or type(saved) ~= "table" then return end
-    for _, name in ipairs(GROUP_ORDER) do
-        local v = tonumber(saved[name])
-        if v ~= nil then settings[name] = math.max(0.0, math.min(5.0, v)) end
+    local saved = loadTable("TunerValues.lua")
+    if saved ~= nil then
+        settings = snapshot(saved)
+        defaultSettings = snapshot(saved)
+        log("settings loaded")
     end
-    log("settings loaded from " .. path)
+    saved = loadTable("TunerPresets.lua")
+    if saved ~= nil then
+        for slot = 1, 9 do
+            if type(saved[slot]) == "table" then presets[slot] = snapshot(saved[slot]) end
+        end
+    end
+    saved = loadTable("TunerOutfits.lua")
+    if saved ~= nil then
+        for key, values in pairs(saved) do
+            if type(key) == "string" and type(values) == "table" then
+                outfits[key] = snapshot(values)
+            end
+        end
+    end
 end
 
 local function saveSettings()
-    local path = savePath()
-    if path == nil then return end
-    local file = io.open(path, "w")
-    if file == nil then log("cannot write " .. path); return end
+    local file = openSaveFile("TunerValues.lua")
+    if file == nil then return end
+    defaultSettings = snapshot(settings)
     file:write("-- Written by EveProportionsTuner; edit in-game with " .. CONFIG.TunerKey .. "\nreturn {\n")
-    for _, name in ipairs(GROUP_ORDER) do
-        file:write(string.format("    %s = %.4f,\n", name, settings[name]))
-    end
+    writeValues(file, settings, "    ")
     file:write("}\n")
     file:close()
     log("settings saved")
+end
+
+local function savePresets()
+    local file = openSaveFile("TunerPresets.lua")
+    if file == nil then return end
+    file:write("-- Written by EveProportionsTuner; load with 1..9, save with Shift+1..9\nreturn {\n")
+    for slot = 1, 9 do
+        if presets[slot] ~= nil then
+            file:write(string.format("    [%d] = {\n", slot))
+            writeValues(file, presets[slot], "        ")
+            file:write("    },\n")
+        end
+    end
+    file:write("}\n")
+    file:close()
+    log("presets saved")
+end
+
+local function saveOutfits()
+    local file = openSaveFile("TunerOutfits.lua")
+    if file == nil then return end
+    file:write("-- Written by EveProportionsTuner; bind with 0, unbind with Shift+0\nreturn {\n")
+    for key, values in pairs(outfits) do
+        file:write(string.format("    [%q] = {\n", key))
+        writeValues(file, values, "        ")
+        file:write("    },\n")
+    end
+    file:write("}\n")
+    file:close()
+    log("outfit bindings saved")
+end
+
+-- Route the debounced save: edits made while a bound outfit is worn update
+-- the outfit's binding; otherwise they update the global defaults.
+local function flushSave()
+    if adopted and currentOutfitKey ~= nil and outfits[currentOutfitKey] ~= nil then
+        outfits[currentOutfitKey] = snapshot(settings)
+        saveOutfits()
+    else
+        saveSettings()
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -254,9 +369,46 @@ end
 
 local appliedAddresses = {}
 
+-- The post-process anim instance's outer is the SkeletalMeshComponent, whose
+-- mesh asset uniquely identifies the worn outfit (vanilla and CNS alike).
+local function outfitKeyFor(inst)
+    local key = nil
+    pcall(function()
+        local mesh = inst:GetOuter().SkeletalMesh
+        if live(mesh) then key = mesh:GetFullName() end
+    end)
+    return key
+end
+
+-- Assigned after the widget code; pushes settings into the open panel.
+local refreshPanel = nil
+
+-- Called on the outfit-change paths only (main.lua refresh, new-instance
+-- notify), never from UI edits: a bound outfit's values take over, and
+-- leaving a bound outfit restores the saved defaults.
+local function adoptOutfit(inst)
+    local key = outfitKeyFor(inst)
+    if key == nil then return end
+    if outfits[key] ~= nil then
+        if not (adopted and key == currentOutfitKey) then
+            settings = snapshot(outfits[key])
+            adopted = true
+            log("adopted outfit binding: " .. key)
+            if refreshPanel ~= nil then refreshPanel() end
+        end
+    elseif adopted then
+        settings = snapshot(defaultSettings)
+        adopted = false
+        log("left bound outfit, defaults restored")
+        if refreshPanel ~= nil then refreshPanel() end
+    end
+    currentOutfitKey = key
+end
+
 -- Must be called on the game thread.
-local function applyToInstance(inst)
+local function applyToInstance(inst, adopt)
     if not isOurInstance(inst) then return false end
+    if adopt then adoptOutfit(inst) end
     if not captureBase(inst) then return false end
     for group, props in pairs(GROUPS) do
         local t = settings[group]
@@ -300,7 +452,7 @@ local function applyToInstance(inst)
 end
 
 -- Must be called on the game thread.
-local function applyToAllInstances(force)
+local function applyToAllInstances(force, adopt)
     local instances = nil
     pcall(function() instances = FindAllOf(ABP_MARKER) end)
     if instances == nil then return end
@@ -309,7 +461,7 @@ local function applyToAllInstances(force)
             local addr = nil
             pcall(function() addr = inst:GetAddress() end)
             if force or addr == nil or not appliedAddresses[addr] then
-                if applyToInstance(inst) then
+                if applyToInstance(inst, adopt) then
                     log("applied to instance " .. tostring(addr))
                 end
             end
@@ -322,7 +474,7 @@ end
 -- background watcher.
 function Tuner.ApplyTo(inst)
     if not CONFIG.EnableTuner then return end
-    applyToInstance(inst)
+    applyToInstance(inst, true)
 end
 
 -- ---------------------------------------------------------------------------
@@ -471,6 +623,40 @@ local function ensureWidget()
     end)
     log("sliders found: " .. found .. "/8")
 
+    -- Shortcut hints: the cooked layout ships no hint text, so append a
+    -- TextBlock to the VBox at runtime. Do it before AddToViewport so Slate
+    -- builds it together with the rest of the tree.
+    pcall(function()
+        local vbox = findChild(widget, "VBox")
+        local textClass = StaticFindObject("/Script/UMG.TextBlock")
+        if vbox == nil or not live(textClass) then return end
+        local hint = StaticConstructObject(textClass, widget.WidgetTree)
+        if not live(hint) then return end
+        -- Match the label typeface but at a fixed small size; each step is
+        -- optional and degrades to the default font.
+        pcall(function()
+            local ref = findChild(widget, "Label_Size")
+            hint.Font = ref.Font
+        end)
+        pcall(function() hint.Font.Size = 16 end)
+        pcall(function() hint:SetAutoWrapText(true) end)
+        hint:SetText(FText(
+            "Left/Right arrows: fine-tune last slider\n" ..
+            "1-9: load preset    Shift+1-9: save preset\n" ..
+            "0: bind to worn outfit    Shift+0: unbind"))
+        local slot = vbox:AddChildToVerticalBox(hint)
+        pcall(function() slot.Padding.Top = 10.0 end)
+        log("shortcut hints added")
+    end)
+
+    -- Widen the panel a bit beyond the cooked width so the hint text and
+    -- longer labels breathe. Factor is relative to the authored width.
+    pcall(function()
+        local box = findChild(widget, "WidthBox")
+        local w = box.WidthOverride
+        if type(w) == "number" and w > 0 then box:SetWidthOverride(w * 1.25) end
+    end)
+
     pcall(function() widget.bIsFocusable = true end)
     log("adding to viewport")
     pcall(function() widget:AddToViewport(100) end)
@@ -482,7 +668,7 @@ local function updateLabel(widget, group)
     local label = findChild(widget, "Label_" .. group)
     if label == nil then return end
     pcall(function()
-        label:SetText(FText(string.format("%s  %.2f", group, settings[group])))
+        label:SetText(FText(string.format("%s  %.2f", DISPLAY[group] or group, settings[group])))
     end)
 end
 
@@ -510,6 +696,7 @@ end
 local hideUI -- forward declaration
 
 local dirtyAt = nil
+local lastTouched = "Size" -- arrow-key fine adjust targets this group
 local buttonWasPressed = { Reset = false, Hide = false }
 local firstChangeSeen = false
 local firstTickSeen = false
@@ -524,6 +711,35 @@ local function readSlider(slider)
     if ok and type(value) == "number" then return value end
     return nil
 end
+
+-- Push current settings into the open panel (reset, preset load, outfit
+-- adoption). SetValue on a live widget doesn't reliably move the Slate
+-- handle — and a handle left in place would be read back by the next poll
+-- tick, reverting settings — so verify with a readback and rebuild the
+-- widget on mismatch (construction initializes Slate from values set before
+-- AddToViewport, which always works).
+local function pushSettingsToSliders()
+    if not ui.visible or not live(ui.widget) then return end
+    local mismatch = false
+    eachSlider(ui.widget, function(group, slider)
+        pcall(function() slider:SetValue(settings[group]) end)
+        local rb = readSlider(slider)
+        if rb == nil or math.abs(rb - settings[group]) > 0.0005 then mismatch = true end
+        updateLabel(ui.widget, group)
+    end)
+    if mismatch then
+        crumb("slider push: SetValue readback mismatch, rebuilding widget")
+        pcall(function() ui.widget:RemoveFromParent() end)
+        ui.widget = nil
+        local rebuilt = ensureWidget()
+        if rebuilt ~= nil then
+            for _, group in ipairs(GROUP_ORDER) do updateLabel(rebuilt, group) end
+            pcall(function() rebuilt:SetVisibility(0) end)
+            setUIInputMode(true)
+        end
+    end
+end
+refreshPanel = pushSettingsToSliders
 
 local function pollTick()
     if not ui.visible or not live(ui.widget) then
@@ -599,6 +815,7 @@ local function pollTick()
         local value = readSlider(slider)
         if value ~= nil and math.abs(value - settings[group]) > 0.0005 then
             settings[group] = value
+            lastTouched = group
             updateLabel(widget, group)
             changed = true
             if not firstChangeSeen then
@@ -619,10 +836,7 @@ local function pollTick()
             log("button pressed: " .. name)
             if name == "Reset" then
                 for _, group in ipairs(GROUP_ORDER) do settings[group] = 1.0 end
-                eachSlider(widget, function(group, slider)
-                    pcall(function() slider:SetValue(1.0) end)
-                    updateLabel(widget, group)
-                end)
+                pushSettingsToSliders()
                 changed = true
             elseif name == "Hide" then
                 hideUI()
@@ -637,7 +851,7 @@ local function pollTick()
     end
     if dirtyAt ~= nil and os.clock() - dirtyAt > 0.5 then
         dirtyAt = nil
-        saveSettings()
+        flushSave()
     end
 end
 
@@ -669,7 +883,7 @@ end
 
 hideUI = function()
     ui.visible = false
-    if dirtyAt ~= nil then dirtyAt = nil; saveSettings() end
+    if dirtyAt ~= nil then dirtyAt = nil; flushSave() end
     if live(ui.widget) then
         pcall(function() ui.widget:SetVisibility(1) end) -- ESlateVisibility::Collapsed
     end
@@ -687,6 +901,67 @@ local function toggleUI()
 end
 
 -- ---------------------------------------------------------------------------
+-- Panel-only keyboard actions (fine adjust, presets, outfit bindings).
+-- All run on the game thread and no-op while the panel is closed.
+-- ---------------------------------------------------------------------------
+
+local function sliderMax(group)
+    return (group == "FacBody" or group == "FacBreast") and 3.0 or 5.0
+end
+
+local function nudge(direction)
+    if not ui.visible then return end
+    local v = settings[lastTouched] + CONFIG.FineTuneStep * direction
+    v = math.max(0.1, math.min(sliderMax(lastTouched), v))
+    if math.abs(v - settings[lastTouched]) < 0.00005 then return end
+    settings[lastTouched] = v
+    pushSettingsToSliders()
+    applyToAllInstances(true)
+    dirtyAt = os.clock()
+end
+
+local function loadPreset(slot)
+    if not ui.visible then return end
+    if presets[slot] == nil then crumb("preset " .. slot .. " is empty"); return end
+    settings = snapshot(presets[slot])
+    pushSettingsToSliders()
+    applyToAllInstances(true)
+    dirtyAt = os.clock()
+    crumb("preset " .. slot .. " loaded")
+end
+
+local function savePreset(slot)
+    if not ui.visible then return end
+    presets[slot] = snapshot(settings)
+    savePresets()
+    crumb("preset " .. slot .. " saved")
+end
+
+local function bindOutfit()
+    if not ui.visible then return end
+    if currentOutfitKey == nil then crumb("no outfit seen yet, cannot bind"); return end
+    outfits[currentOutfitKey] = snapshot(settings)
+    adopted = true
+    saveOutfits()
+    crumb("values bound to outfit: " .. currentOutfitKey)
+end
+
+local function unbindOutfit()
+    if not ui.visible then return end
+    if currentOutfitKey == nil or outfits[currentOutfitKey] == nil then
+        crumb("worn outfit has no binding")
+        return
+    end
+    outfits[currentOutfitKey] = nil
+    adopted = false
+    saveOutfits()
+    settings = snapshot(defaultSettings)
+    pushSettingsToSliders()
+    applyToAllInstances(true)
+    crumb("outfit binding removed, defaults restored")
+end
+
+-- ---------------------------------------------------------------------------
 -- Startup
 -- ---------------------------------------------------------------------------
 
@@ -701,6 +976,23 @@ if CONFIG.EnableTuner then
         print("[EveProportionsTuner] unknown TunerKey '" .. tostring(CONFIG.TunerKey) .. "'\n")
     end
 
+    -- Panel-only keys (each handler no-ops while the panel is closed):
+    -- arrows fine-adjust, 1..9 load / Shift+1..9 save presets, 0 binds the
+    -- worn outfit, Shift+0 unbinds it.
+    pcall(function()
+        RegisterKeyBind(Key.LEFT_ARROW, function() ExecuteInGameThread(function() nudge(-1) end) end)
+        RegisterKeyBind(Key.RIGHT_ARROW, function() ExecuteInGameThread(function() nudge(1) end) end)
+        local slotKeys = { Key.ONE, Key.TWO, Key.THREE, Key.FOUR, Key.FIVE,
+                           Key.SIX, Key.SEVEN, Key.EIGHT, Key.NINE }
+        for slot, slotKey in ipairs(slotKeys) do
+            local s = slot
+            RegisterKeyBind(slotKey, function() ExecuteInGameThread(function() loadPreset(s) end) end)
+            RegisterKeyBind(slotKey, { ModifierKey.SHIFT }, function() ExecuteInGameThread(function() savePreset(s) end) end)
+        end
+        RegisterKeyBind(Key.ZERO, function() ExecuteInGameThread(function() bindOutfit() end) end)
+        RegisterKeyBind(Key.ZERO, { ModifierKey.SHIFT }, function() ExecuteInGameThread(function() unbindOutfit() end) end)
+    end)
+
     -- Fallback: catches instances created outside main.lua's refresh path
     -- (e.g. after level load). Event-driven, not a timer -- the previous
     -- 1 s FindAllOf poll on the game thread caused a visible hitch every
@@ -708,7 +1000,7 @@ if CONFIG.EnableTuner then
     -- construction before saved values are written into it.
     NotifyOnNewObject(ABP_CLASS_PATH, function()
         ExecuteWithDelay(300, function()
-            ExecuteInGameThread(function() applyToAllInstances(false) end)
+            ExecuteInGameThread(function() applyToAllInstances(false, true) end)
         end)
     end)
 end
