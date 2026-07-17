@@ -1,0 +1,28 @@
+--- main.lua.orig	2026-07-17 10:09:21.629569390 +0200
++++ main.lua	2026-07-17 10:09:21.615326567 +0200
+@@ -29,6 +29,9 @@
+     end
+ end)
+ 
++local Tuner = nil
++pcall(function() Tuner = require("EveProportionsTuner") end)
++
+ local logBudget = 12
+ local function log(message)
+     if not CONFIG.DebugLogging or logBudget <= 0 then return end
+@@ -123,6 +126,7 @@
+     local activeName = fullName(active)
+     if activeName ~= nil and activeName:find("ABP_EveProportions_C", 1, true) ~= nil then
+         log("skip refresh " .. tostring(source) .. " (already active)")
++        if Tuner then pcall(function() Tuner.ApplyTo(active) end) end
+         return
+     end
+ 
+@@ -136,6 +140,7 @@
+     refreshing = false
+     local after = nil
+     pcall(function() after = body:GetPostProcessInstance() end)
++    if Tuner then pcall(function() Tuner.ApplyTo(after) end) end
+     log("refresh " .. tostring(source) .. " mode=" .. tostring(mode) ..
+         " call=" .. tostring(initialized) .. " before=" .. tostring(fullName(before)) ..
+         " after=" .. tostring(fullName(after)))
