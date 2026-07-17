@@ -111,6 +111,13 @@ paths (e.g. level load). Deliberately **not** a polling loop — a 1 s
 - The game keeps stealing input mode while the panel is open, so
   `SetInputMode_UIOnlyEx` is re-asserted every poll tick (80 ms, only while
   the panel is visible; zero background cost when hidden).
+- SB hides the **hardware cursor** no matter how often `bShowMouseCursor` is
+  reasserted — mouse input works over the panel, but the pointer is
+  invisible. DekCNS solved this with a self-ticking virtual-cursor widget
+  (`WB_MouseCursor`: a `HitTestInvisible` image following
+  `GetMousePositionScaledByDPI` every frame), so if CNS is installed the
+  tuner spawns one of those above the panel and removes it on hide. Without
+  CNS the panel still works with the invisible pointer.
 - On Lua hot-reload, stale widget instances are purged from the viewport
   before creating a new one.
 

@@ -53,6 +53,15 @@ end
 local WIDGET_ASSET = "/Game/Mods/EveProportions/WBP_EveProportions"
 local WIDGET_CLASS = WIDGET_ASSET .. ".WBP_EveProportions_C"
 local WBL_PATH = "/Script/UMG.Default__WidgetBlueprintLibrary"
+
+-- SB hides the hardware cursor no matter how often bShowMouseCursor is
+-- reasserted, so mouse input works over the panel but the pointer is
+-- invisible. DekCNS solves this with a self-ticking virtual-cursor widget
+-- (an image following GetMousePositionScaledByDPI, HitTestInvisible). If
+-- CNS is installed, spawn one of those above the panel; without CNS the
+-- panel still works, just with the invisible pointer.
+local CURSOR_ASSET = "/Game/Mods/DekCNS_P/Widgets/WB_MouseCursor"
+local CURSOR_CLASS = CURSOR_ASSET .. ".WB_MouseCursor_C"
 local ABP_MARKER = "ABP_EveProportions_C"
 local ABP_CLASS_PATH = "/Game/Mods/EveProportions/ABP_EveProportions.ABP_EveProportions_C"
 
@@ -503,7 +512,7 @@ end
 -- Widget lifecycle
 -- ---------------------------------------------------------------------------
 
-local ui = { widget = nil, visible = false, pollActive = false }
+local ui = { widget = nil, cursor = nil, visible = false, pollActive = false }
 
 -- Recursive fallback lookup through the widget tree, for the case where the
 -- named widgets were not cooked as class variables (bIsVariable=false).
@@ -563,31 +572,35 @@ end
 -- AssetRegistryHelpers:GetAsset loads straight from the pak even though
 -- LogicMods paks never patch AssetRegistry.bin (UE4SS's LoadAsset relies
 -- on the registry and fails for this asset).
-local function loadWidgetClass()
-    local widgetClass = StaticFindObject(WIDGET_CLASS)
-    if live(widgetClass) then return widgetClass end
+local function loadClass(assetPath, classPath, quiet)
+    local cls = StaticFindObject(classPath)
+    if live(cls) then return cls end
 
     local helpers = StaticFindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers")
     if live(helpers) then
-        log("loading widget class via GetAsset")
+        log("loading " .. classPath .. " via GetAsset")
         local ok, err = pcall(function()
             local assetData = {
-                ObjectPath = UEHelpers.FindOrAddFName(WIDGET_CLASS),
+                ObjectPath = UEHelpers.FindOrAddFName(classPath),
             }
             helpers:GetAsset(assetData)
         end)
-        if not ok then print("[EveProportionsTuner] GetAsset failed: " .. tostring(err) .. "\n") end
-        widgetClass = StaticFindObject(WIDGET_CLASS)
-        if live(widgetClass) then return widgetClass end
-    else
+        if not ok and not quiet then print("[EveProportionsTuner] GetAsset failed: " .. tostring(err) .. "\n") end
+        cls = StaticFindObject(classPath)
+        if live(cls) then return cls end
+    elseif not quiet then
         print("[EveProportionsTuner] AssetRegistryHelpers not found\n")
     end
 
-    local ok, err = pcall(function() LoadAsset(WIDGET_ASSET) end)
-    if not ok then print("[EveProportionsTuner] LoadAsset failed: " .. tostring(err) .. "\n") end
-    widgetClass = StaticFindObject(WIDGET_CLASS)
-    if live(widgetClass) then return widgetClass end
+    local ok, err = pcall(function() LoadAsset(assetPath) end)
+    if not ok and not quiet then print("[EveProportionsTuner] LoadAsset failed: " .. tostring(err) .. "\n") end
+    cls = StaticFindObject(classPath)
+    if live(cls) then return cls end
     return nil
+end
+
+local function loadWidgetClass()
+    return loadClass(WIDGET_ASSET, WIDGET_CLASS, false)
 end
 
 local function ensureWidget()
@@ -596,7 +609,9 @@ local function ensureWidget()
 
     -- Purge instances orphaned by Lua hot-reload: the old state's widget
     -- stays on the viewport and can sit on top of (and eat input meant
-    -- for) the fresh one.
+    -- for) the fresh one. Same for a cursor left behind by the old state
+    -- (this can also catch CNS's own cursor if its UI is open right now —
+    -- acceptable, reopening the CNS UI restores it).
     pcall(function()
         local stale = FindAllOf("WBP_EveProportions_C")
         if stale ~= nil then
@@ -605,6 +620,10 @@ local function ensureWidget()
                 if pcall(function() w:RemoveFromParent() end) then purged = purged + 1 end
             end
             if purged > 0 then log("purged " .. purged .. " stale widget instances") end
+        end
+        local staleCursors = FindAllOf("WB_MouseCursor_C")
+        if staleCursors ~= nil then
+            for _, w in ipairs(staleCursors) do pcall(function() w:RemoveFromParent() end) end
         end
     end)
 
@@ -688,6 +707,37 @@ local function ensureWidget()
     return widget
 end
 
+local function hideCursor()
+    if ui.cursor ~= nil then pcall(function() ui.cursor:RemoveFromParent() end) end
+    ui.cursor = nil
+end
+
+local cursorMissing = false -- CNS absent; don't retry the load every open
+local function showCursor()
+    if cursorMissing then return end
+    if live(ui.cursor) then
+        local onViewport = false
+        pcall(function() onViewport = ui.cursor:IsInViewport() end)
+        if onViewport then return end
+        hideCursor()
+    end
+    local cls = loadClass(CURSOR_ASSET, CURSOR_CLASS, true)
+    if not live(cls) then
+        cursorMissing = true
+        log("virtual cursor unavailable (DekCNS not installed?)")
+        return
+    end
+    local pc = UEHelpers.GetPlayerController()
+    local wbl = getWBL()
+    if not live(pc) or wbl == nil then return end
+    local cursor = nil
+    pcall(function() cursor = wbl:Create(pc, cls, pc) end)
+    if not live(cursor) then return end
+    pcall(function() cursor:AddToViewport(200) end) -- above the panel (100)
+    ui.cursor = cursor
+    log("virtual cursor shown")
+end
+
 local function updateLabel(widget, group)
     local label = findChild(widget, "Label_" .. group)
     if label == nil then return end
@@ -761,6 +811,7 @@ local function pushSettingsToSliders()
             for _, group in ipairs(GROUP_ORDER) do updateLabel(rebuilt, group) end
             pcall(function() rebuilt:SetVisibility(0) end)
             setUIInputMode(true)
+            showCursor() -- ensureWidget's purge may have taken the cursor down too
         end
     end
 end
@@ -902,6 +953,7 @@ local function showUI()
     ui.visible = true
     log("setting input mode")
     setUIInputMode(true)
+    showCursor()
     startPolling()
     log("UI shown")
 end
@@ -912,6 +964,7 @@ hideUI = function()
     if live(ui.widget) then
         pcall(function() ui.widget:SetVisibility(1) end) -- ESlateVisibility::Collapsed
     end
+    hideCursor()
     setUIInputMode(false)
     log("UI hidden")
 end
