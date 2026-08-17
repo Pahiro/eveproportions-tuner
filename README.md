@@ -2,10 +2,12 @@
 
 Adds an in-game adjustment panel to EveProportions: press **F7** and the
 `WBP_EveProportions` widget that already ships in the mod's pak (currently
-dormant — pure layout, no blueprint logic) appears with 8 working sliders.
-Values apply live to the post-process AnimBP, persist across sessions, and
-re-apply automatically on outfit changes. **No pak changes are needed** —
-everything runs through UE4SS Lua against the existing assets.
+dormant — pure layout, no blueprint logic) appears with 12 working sliders,
+8 of them cooked into the pak and 4 (Thigh/Calf/Ankle Width, Waist Line)
+built at runtime and grafted into the same panel. Values apply live to the
+post-process AnimBP, persist across sessions, and re-apply automatically on
+outfit changes. **No pak changes are needed** — everything runs through
+UE4SS Lua against the existing assets.
 
 <img width="232" height="436" alt="image" src="https://github.com/user-attachments/assets/26fca8a7-389f-4f05-bc0e-0987b5366b12" />
 
@@ -13,9 +15,19 @@ While the panel is open:
 
 | Key | Action |
 |---|---|
-| Left/Right arrows | fine-tune the last-touched slider (step configurable) |
+| Up/Down arrows | pick which slider Left/Right fine-tunes (marked `>` in its label) |
+| Left/Right arrows | fine-tune the selected slider (step configurable) |
+| Shift+Left/Right | fine-tune by 10x that step |
 | 1–9 / Shift+1–9 | load / save preset slot (`TunerPresets.lua`) |
 | 0 / Shift+0 | bind / unbind current values to the worn outfit (`TunerOutfits.lua`) |
+| PassthroughKey (`F8`) | toggle native game input through to other mods (e.g. DekCNS hotkeys) while the panel is open |
+
+The four girth sliders scale only the axes that make a limb thinner, not the
+length — the original groups scale all three axes and translation together,
+which also shortens the limb and drags the joint inward. `ThighGirth` and
+`AnkleGirth` share bones with `Thigh`/`Legs`, so per-bone multipliers are
+accumulated across every group a bone belongs to rather than the last one
+written winning.
 
 Outfit bindings are keyed by the body mesh asset path (works for CNS custom
 outfits too): a bound outfit adopts its own values whenever it's equipped,
@@ -120,6 +132,16 @@ paths (e.g. level load). Deliberately **not** a polling loop — a 1 s
   CNS the panel still works with the invisible pointer.
 - On Lua hot-reload, stale widget instances are purged from the viewport
   before creating a new one.
+- Cloning a Slot's properties has to be read into plain Lua numbers and
+  written back field-by-field (`slot.Padding.Top = ...`); assigning the
+  whole struct, or trusting a `SetPadding`/`SetSize`-style setter call that
+  didn't throw, can both silently no-op. And the source widget for that
+  capture matters: this panel wraps each cooked slider in its own `SizeBox`
+  (`Label_X` sits directly in the row `VerticalBox`, but `Slider_X` sits
+  inside `SB_X`, which is the actual `VerticalBox` child) — the row-to-row
+  gap lives on the `SizeBox`'s slot, not the slider's own, so runtime rows
+  cloned from the slider directly came out with zero spacing until the
+  capture read from the wrapper instead.
 
 Tested on the Steam release (UE4SS 3.0.1, also under Proton). Feel free to
 use, adapt, or rewrite any of this for the mod — no credit needed.
