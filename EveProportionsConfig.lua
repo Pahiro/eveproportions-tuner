@@ -17,7 +17,10 @@ return {
     --
     -- While the panel is open:
     --   Up/Down arrows     pick which slider to fine-adjust (marked "> ")
-    --   Left/Right arrows  nudge the selected slider by FineTuneStep
+    --   Left/Right arrows  nudge the selected slider by FineTuneStep --
+    --                      except the rows measured in centimetres or
+    --                      degrees (Bust Height/Weight), which carry their
+    --                      own step since 0.01 cm a press is useless
     --   Shift+Left/Right   nudge by 10x that (held-arrow repeat was tried
     --                      and dropped -- the panel's input mode never lets
     --                      the game see the key as held, so this is the

@@ -16,13 +16,19 @@
 -- some Scale axes and leave Translation/Rotation alone, which is how the
 -- girth sliders slim a limb without also shortening it or dragging the joint
 -- inward. Where several groups name the same bone the multipliers compose.
--- Values persist to TunerValues.lua next to this script.
+--
+-- Groups listed in OFFSET are the exception to all of the above: their
+-- slider is an additive delta in centimetres or degrees (0.0 = untouched)
+-- rather than a multiplier, because "move it down" cannot be expressed as a
+-- multiplier over an authored Translation of zero. That is how Bust
+-- Height/Weight work. Values persist to TunerValues.lua next to this script.
 --
 -- Keys while the panel is open:
 --   Up/Down arrows      move the selection (marked "> " in its label)
---   Left/Right arrows   nudge the selected slider by FineTuneStep; hold to
---                       repeat where the input mode allows it, and
---                       Shift+Left/Right steps 10x for the times it does not
+--   Left/Right arrows   nudge the selected slider by FineTuneStep (or by
+--                       that row's own step, for the rows measured in
+--                       centimetres or degrees rather than in multiples);
+--                       Shift+Left/Right steps 10x
 --   1..9                load preset slot        Shift+1..9  save preset slot
 --   0                   bind current values to the worn outfit
 --   Shift+0             remove the worn outfit's binding
@@ -103,6 +109,13 @@ local ABP_CLASS_PATH = "/Game/Mods/EveProportions/ABP_EveProportions.ABP_EveProp
 local GROUPS = {
     Size = { "B_Root" }, -- whole body, feet stay grounded
     Breast = { "B_Dm_L_Breast_Point", "B_Dm_R_Breast_Point" },
+    -- Same two bones as Breast, but driven as additive offsets (see OFFSET):
+    -- Height slides them up/down the body, Weight tips them down from their
+    -- root the way mass would, which reads as sag rather than as a shorter
+    -- chest. Requested on the mod page ("breast height or weight ... so you
+    -- can lower them"), which the size multipliers genuinely cannot do.
+    BustHeight = { "B_Dm_L_Breast_Point", "B_Dm_R_Breast_Point" },
+    BustWeight = { "B_Dm_L_Breast_Point", "B_Dm_R_Breast_Point" },
     -- Subtle: top-of-breast fullness only.
     FacBreast = { "B_Ab_L_Pectro0", "B_Ab_L_Pectro1", "B_Ab_R_Pectro0", "B_Ab_R_Pectro1" },
     -- Hip_Reg = butt. B_Bip001_Pelvis removed: it scaled the whole skeleton
@@ -143,6 +156,7 @@ local GROUP_ORDER = {
     "Size", "Breast", "FacBreast", "Hip", "Waist", "Belly", "Thigh", "FacBody",
     -- Runtime-built rows, appended to the panel in this order.
     "ThighGirth", "CalfGirth", "AnkleGirth", "WaistGirth",
+    "BustHeight", "BustWeight",
 }
 
 -- What the panel labels display for each group (internal keys and saved
@@ -160,6 +174,15 @@ local DISPLAY = {
     CalfGirth = "Calf Width",
     AnkleGirth = "Ankle Width",
     WaistGirth = "Waist Line",
+    BustHeight = "Bust Height",
+    BustWeight = "Bust Weight",
+}
+
+-- Appended after the number in the label, for the sliders whose value is not
+-- a bare multiplier and would otherwise read as one.
+local UNIT = {
+    BustHeight = " cm",
+    BustWeight = " deg",
 }
 
 -- How a group's multiplier is applied to its nodes.
@@ -197,6 +220,47 @@ local SHAPE = {
     WaistGirth = { x = false, y = true, z = true, offsets = false },
 }
 
+-- EBoneModificationMode / EBoneControlSpace values the offset code needs by
+-- number (the BONE_MODE / BONE_SPACE maps further down are for logging).
+local MODE_IGNORE = 0
+local MODE_ADDITIVE = 2
+local SPACE_COMPONENT = 1
+
+-- Additive offset groups. Their slider is a delta added to the node's
+-- authored Translation/Rotation -- centimetres or degrees, 0.0 = untouched --
+-- instead of a multiplier over it. That distinction is the whole point: the
+-- breast nodes ship an authored Translation of (0, 0, 0), and no multiplier
+-- over zero will ever move them, so the existing Breast slider can only make
+-- the bust bigger or smaller, never lower.
+--
+--   channel  "translation" (value is centimetres) or "rotation" (degrees)
+--   axis     which field it lands on: x/y/z, or pitch/yaw/roll
+--   sign     applied to the slider value before it is written, so that a
+--            positive slider always means what its label says
+--   space    EBoneControlSpace the delta is expressed in. Component space is
+--            the one that needs no mirroring -- both breast bones move down
+--            for the same -Z and tip the same way for the same rotation,
+--            where a bone-space delta would send left and right opposite
+--            ways. It is forced onto the node only where the author left
+--            that channel on Ignore, i.e. where there is nothing of theirs
+--            to trample; see applyChannelMode.
+--
+-- Axis caveat, same class of unknown as the SHAPE masks above: component
+-- space is Z-up, so BustHeight's axis is not in doubt. BustWeight's is --
+-- a droop is a rotation about the body's left-right axis, and whether that
+-- is component-space Y (Pitch) or X (Roll) depends on which way this
+-- skeleton's mesh faces in component space. Pitch is the assumption here.
+-- If Bust Weight swings the bust sideways rather than tipping it down,
+-- change axis to "roll"; that exhausts the options, and Ctrl+R hot-reloads
+-- this file. DumpBoneInventory prints each node's TransMode/RotMode, which
+-- is also worth a look: a channel already on Replace keeps the author's own
+-- space and the axis comment above may not apply to it.
+local OFFSET = {
+    BustHeight = { channel = "translation", axis = "z", sign = 1.0, space = SPACE_COMPONENT },
+    -- Positive = heavier = tips down, so the sign flips UE's nose-up Pitch.
+    BustWeight = { channel = "rotation", axis = "pitch", sign = -1.0, space = SPACE_COMPONENT },
+}
+
 -- Slider bounds per group; anything unlisted uses DEFAULT_RANGE. The
 -- original eight keep the ranges they were forced to at widget creation.
 local DEFAULT_RANGE = { min = 0.1, max = 5.0 }
@@ -207,11 +271,31 @@ local RANGE = {
     CalfGirth = { min = 0.25, max = 2.0 },
     AnkleGirth = { min = 0.25, max = 2.0 },
     WaistGirth = { min = 0.25, max = 2.0 },
+    -- Offset sliders are in real units, not multiples: centimetres of travel
+    -- and degrees of tilt, both signed so the same slider raises or lowers.
+    BustHeight = { min = -8.0, max = 8.0 },
+    BustWeight = { min = -30.0, max = 30.0 },
+}
+
+-- The value a slider rests at when nothing has been set and what Reset puts
+-- it back to. A multiplier is neutral at 1.0; an additive offset at 0.0.
+local NEUTRAL = {
+    BustHeight = 0.0,
+    BustWeight = 0.0,
+}
+
+-- Per-press arrow-key step, where CONFIG.FineTuneStep (tuned for
+-- multipliers) would be absurd: 0.01 cm a press is 800 presses to cross the
+-- Bust Height range. Shift still multiplies by COARSE_MULTIPLIER.
+local STEP = {
+    BustHeight = 0.1,
+    BustWeight = 0.5,
 }
 
 -- Groups with no cooked Slider_<key>/Label_<key> in the pak; built at runtime.
 local RUNTIME_GROUPS = {
     ThighGirth = true, CalfGirth = true, AnkleGirth = true, WaistGirth = true,
+    BustHeight = true, BustWeight = true,
 }
 
 local function live(value)
@@ -252,12 +336,19 @@ pcall(function()
     scriptDir = source:gsub("[\\/][^\\/]+$", "")
 end)
 
--- Copy only known groups, clamped to sane bounds; missing groups become 1.0.
+-- Copy only known groups, clamped to that group's own slider range; a group
+-- the source table doesn't mention (an older TunerValues.lua, a preset saved
+-- before a slider existed) falls back to its neutral. Clamping to the range
+-- rather than one hardcoded span matters now that offsets go negative, and
+-- it also keeps a stale out-of-range value from landing somewhere the poll
+-- loop would refuse to read back.
 local function snapshot(values)
     local copy = {}
     for _, name in ipairs(GROUP_ORDER) do
+        local range = RANGE[name] or DEFAULT_RANGE
         local v = tonumber(values and values[name])
-        copy[name] = v ~= nil and math.max(0.0, math.min(5.0, v)) or 1.0
+        if v == nil then v = NEUTRAL[name] or 1.0 end
+        copy[name] = math.max(range.min, math.min(range.max, v))
     end
     return copy
 end
@@ -286,7 +377,8 @@ end
 
 local function writeValues(file, values, indent)
     for _, name in ipairs(GROUP_ORDER) do
-        file:write(string.format("%s%s = %.4f,\n", indent, name, values[name] or 1.0))
+        file:write(string.format("%s%s = %.4f,\n", indent, name,
+            values[name] or NEUTRAL[name] or 1.0))
     end
 end
 
@@ -493,7 +585,9 @@ local function dumpBoneInventory(src)
             line = line .. " ScaleSpace=" .. spaceName(node.ScaleSpace) ..
                 " ScaleMode=" .. modeName(node.ScaleMode) ..
                 " TransSpace=" .. spaceName(node.TranslationSpace) ..
-                " RotSpace=" .. spaceName(node.RotationSpace)
+                " TransMode=" .. modeName(node.TranslationMode) ..
+                " RotSpace=" .. spaceName(node.RotationSpace) ..
+                " RotMode=" .. modeName(node.RotationMode)
         end)
         if not ok then line = line .. " <transform unreadable>" end
         local group = groupOf[bone]
@@ -545,6 +639,18 @@ local function captureBase(inst)
                     entry.s = { s.X, s.Y, s.Z }
                     entry.t = { t.X, t.Y, t.Z }
                     entry.r = { r.Pitch, r.Yaw, r.Roll }
+                    -- Which channels the author actually drives, and in what
+                    -- space. The offset sliders need this both ways: to know
+                    -- whether forcing a channel on would trample something,
+                    -- and to put it back the way it was once the offset
+                    -- returns to zero. Read individually -- a node missing
+                    -- one of these must not cost us the whole entry.
+                    local modes = {}
+                    pcall(function() modes.TranslationMode = node.TranslationMode end)
+                    pcall(function() modes.TranslationSpace = node.TranslationSpace end)
+                    pcall(function() modes.RotationMode = node.RotationMode end)
+                    pcall(function() modes.RotationSpace = node.RotationSpace end)
+                    entry.modes = modes
                 end
                 if entry.alpha == nil and entry.node == nil then
                     error("neither alpha float nor node struct found")
@@ -622,6 +728,54 @@ local function adoptOutfit(inst)
     currentOutfitKey = key
 end
 
+-- A Translation/Rotation written into a ModifyBone node only reaches the
+-- pose if that channel's mode isn't Ignore, and the numbers only mean what
+-- OFFSET's axis comment says if the channel is in the space the delta was
+-- written for. Both are forced, but only while an offset is actually
+-- non-zero and only where the author left the channel on Ignore -- there is
+-- nothing of theirs to preserve in that case. Where the author does drive
+-- the channel, their mode and space stand and the delta rides along in
+-- whatever space they chose. Back at zero, the authored values are restored,
+-- so a reset really does hand the node back untouched.
+local channelWarned = {}
+
+local function applyChannelMode(node, base, kind, wantedSpace, active)
+    local modes = base.modes
+    if modes == nil then return end
+    local modeProp, spaceProp = kind .. "Mode", kind .. "Space"
+    local authoredMode, authoredSpace = modes[modeProp], modes[spaceProp]
+    if not active then
+        if authoredMode ~= nil then pcall(function() node[modeProp] = authoredMode end) end
+        if authoredSpace ~= nil then pcall(function() node[spaceProp] = authoredSpace end) end
+        return
+    end
+    if authoredMode == MODE_IGNORE then
+        pcall(function() node[modeProp] = MODE_ADDITIVE end)
+        if wantedSpace ~= nil then pcall(function() node[spaceProp] = wantedSpace end) end
+        return
+    end
+    -- Not the Ignore case, so the offset is riding on someone else's terms.
+    -- Both remaining shapes are ones a "Bust Height does nothing" report
+    -- would otherwise give no way to tell apart, so say which it is, once
+    -- per channel: a nil mode means the property could not be read at all
+    -- (nothing was forced on, and a channel left on Ignore swallows the
+    -- delta silently), while a real mode means the author drives it and the
+    -- delta lands in THEIR space, which may not be the one the axis in
+    -- OFFSET was chosen for.
+    if not channelWarned[kind] then
+        channelWarned[kind] = true
+        if authoredMode == nil then
+            crumb(kind .. " mode could not be read on " .. tostring(base.node) ..
+                "; an offset slider for it may do nothing")
+        else
+            crumb(string.format(
+                "%s on %s is authored as %s in %s, left as-is; the offset is added in that space, not %s",
+                kind, tostring(base.node), modeName(authoredMode), spaceName(authoredSpace),
+                spaceName(wantedSpace)))
+        end
+    end
+end
+
 -- Must be called on the game thread.
 local function applyToInstance(inst, adopt)
     if not isOurInstance(inst) then return false end
@@ -635,19 +789,56 @@ local function applyToInstance(inst, adopt)
     -- pairs() order win.
     local mult = {}
     for group, props in pairs(GROUPS) do
-        local t = settings[group] or 1.0
-        local shape = SHAPE[group] or DEFAULT_SHAPE
-        for _, prop in ipairs(props) do
-            local m = mult[prop]
-            if m == nil then
-                m = { x = 1.0, y = 1.0, z = 1.0, offsets = 1.0, alpha = 1.0 }
-                mult[prop] = m
+        -- OFFSET groups are handled below; they rest at 0.0, and running one
+        -- through here would multiply its bones' scale (and alpha) by zero.
+        if OFFSET[group] == nil then
+            local t = settings[group] or 1.0
+            local shape = SHAPE[group] or DEFAULT_SHAPE
+            for _, prop in ipairs(props) do
+                local m = mult[prop]
+                if m == nil then
+                    m = { x = 1.0, y = 1.0, z = 1.0, offsets = 1.0, alpha = 1.0 }
+                    mult[prop] = m
+                end
+                if shape.x then m.x = m.x * t end
+                if shape.y then m.y = m.y * t end
+                if shape.z then m.z = m.z * t end
+                if shape.offsets then m.offsets = m.offsets * t end
+                m.alpha = m.alpha * t
             end
-            if shape.x then m.x = m.x * t end
-            if shape.y then m.y = m.y * t end
-            if shape.z then m.z = m.z * t end
-            if shape.offsets then m.offsets = m.offsets * t end
-            m.alpha = m.alpha * t
+        end
+    end
+
+    -- Additive offsets, accumulated per property the same way the multipliers
+    -- are, so two offset groups naming one bone sum rather than the last one
+    -- written winning. A bone reached only by an offset group still needs a
+    -- neutral multiplier entry, or the write loop below would skip it.
+    local add = {}
+    for group, cfg in pairs(OFFSET) do
+        local delta = (tonumber(settings[group]) or 0.0) * (cfg.sign or 1.0)
+        for _, prop in ipairs(GROUPS[group] or {}) do
+            local a = add[prop]
+            if a == nil then
+                a = {
+                    translation = { x = 0.0, y = 0.0, z = 0.0 },
+                    rotation = { pitch = 0.0, yaw = 0.0, roll = 0.0 },
+                }
+                add[prop] = a
+            end
+            local channel = (cfg.channel == "rotation") and a.rotation or a.translation
+            channel[cfg.axis] = (channel[cfg.axis] or 0.0) + delta
+            if delta ~= 0.0 then
+                if cfg.channel == "rotation" then
+                    a.rotationActive, a.rotationSpace = true, cfg.space
+                else
+                    a.translationActive, a.translationSpace = true, cfg.space
+                end
+            end
+        end
+    end
+    for prop in pairs(add) do
+        if mult[prop] == nil then
+            mult[prop] = { x = 1.0, y = 1.0, z = 1.0, offsets = 1.0, alpha = 1.0 }
         end
     end
 
@@ -665,14 +856,24 @@ local function applyToInstance(inst, adopt)
                 s.X = base.s[1] * m.x
                 s.Y = base.s[2] * m.y
                 s.Z = base.s[3] * m.z
+                -- Offset sliders add on top of the scaled authored offsets
+                -- rather than replacing them, so Bust Height and the Breast
+                -- size slider stack instead of fighting.
+                local a = add[prop]
+                local dt = a ~= nil and a.translation or nil
+                local dr = a ~= nil and a.rotation or nil
                 local tr = node.Translation
-                tr.X = base.t[1] * m.offsets
-                tr.Y = base.t[2] * m.offsets
-                tr.Z = base.t[3] * m.offsets
+                tr.X = base.t[1] * m.offsets + (dt ~= nil and dt.x or 0.0)
+                tr.Y = base.t[2] * m.offsets + (dt ~= nil and dt.y or 0.0)
+                tr.Z = base.t[3] * m.offsets + (dt ~= nil and dt.z or 0.0)
                 local r = node.Rotation
-                r.Pitch = base.r[1] * m.offsets
-                r.Yaw = base.r[2] * m.offsets
-                r.Roll = base.r[3] * m.offsets
+                r.Pitch = base.r[1] * m.offsets + (dr ~= nil and dr.pitch or 0.0)
+                r.Yaw = base.r[2] * m.offsets + (dr ~= nil and dr.yaw or 0.0)
+                r.Roll = base.r[3] * m.offsets + (dr ~= nil and dr.roll or 0.0)
+                if a ~= nil then
+                    applyChannelMode(node, base, "Translation", a.translationSpace, a.translationActive)
+                    applyChannelMode(node, base, "Rotation", a.rotationSpace, a.rotationActive)
+                end
                 if base.alpha ~= nil then inst[prop] = base.alpha end
             elseif base.alpha ~= nil then
                 -- Fallback: alpha attenuation only; engine clamps blend
@@ -1339,7 +1540,11 @@ local function updateLabel(widget, group)
         -- The selected row is marked in its label; there is no focus ring to
         -- lean on, and nothing else would show which slider Left/Right hits.
         local mark = (group == lastTouched) and "> " or "   "
-        local txt = makeText(string.format("%s%s  %.2f", mark, DISPLAY[group] or group, settings[group]))
+        -- The offset rows read in centimetres and degrees, not in multiples
+        -- of the authored shape; without the unit a "-2.50" next to a row of
+        -- "1.00"s looks like a slider driven far out of its range.
+        local txt = makeText(string.format("%s%s  %.2f%s", mark, DISPLAY[group] or group,
+            settings[group], UNIT[group] or ""))
         if txt ~= nil then label:SetText(txt) end
     end)
 end
@@ -1551,7 +1756,9 @@ local function pollTick()
         if pressed and not buttonWasPressed[name] then
             log("button pressed: " .. name)
             if name == "Reset" then
-                for _, group in ipairs(GROUP_ORDER) do settings[group] = 1.0 end
+                for _, group in ipairs(GROUP_ORDER) do
+                    settings[group] = NEUTRAL[group] or 1.0
+                end
                 pushSettingsToSliders()
                 changed = true
             elseif name == "Hide" then
@@ -1703,10 +1910,14 @@ local function selectSlider(direction)
     log("selected slider: " .. lastTouched)
 end
 
-local function nudge(direction, step, allowRebuild)
+-- multiplier scales the selected row's own per-press step (STEP, else
+-- CONFIG.FineTuneStep): the step has to come from the row rather than from
+-- config alone now that a row can be measured in centimetres.
+local function nudge(direction, multiplier, allowRebuild)
     if not ui.visible then return end
     local range = RANGE[lastTouched] or DEFAULT_RANGE
-    local v = settings[lastTouched] + (step or CONFIG.FineTuneStep) * direction
+    local step = (STEP[lastTouched] or CONFIG.FineTuneStep) * (multiplier or 1)
+    local v = settings[lastTouched] + step * direction
     v = math.max(range.min, math.min(range.max, v))
     if math.abs(v - settings[lastTouched]) < 0.00005 then return end
     settings[lastTouched] = v
@@ -1726,7 +1937,7 @@ end
 local COARSE_MULTIPLIER = 10
 
 local function nudgeCoarse(direction)
-    nudge(direction, CONFIG.FineTuneStep * COARSE_MULTIPLIER)
+    nudge(direction, COARSE_MULTIPLIER)
 end
 
 local function loadPreset(slot)

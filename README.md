@@ -2,9 +2,9 @@
 
 Adds an in-game adjustment panel to EveProportions: press **F7** and the
 `WBP_EveProportions` widget that already ships in the mod's pak (currently
-dormant — pure layout, no blueprint logic) appears with 12 working sliders,
-8 of them cooked into the pak and 4 (Thigh/Calf/Ankle Width, Waist Line)
-built at runtime and grafted into the same panel. Values apply live to the
+dormant — pure layout, no blueprint logic) appears with 14 working sliders,
+8 of them cooked into the pak and 6 (Thigh/Calf/Ankle Width, Waist Line,
+Bust Height, Bust Weight) built at runtime and grafted into the same panel. Values apply live to the
 post-process AnimBP, persist across sessions, and re-apply automatically on
 outfit changes. **No pak changes are needed** — everything runs through
 UE4SS Lua against the existing assets.
@@ -16,11 +16,41 @@ While the panel is open:
 | Key | Action |
 |---|---|
 | Up/Down arrows | pick which slider Left/Right fine-tunes (marked `>` in its label) |
-| Left/Right arrows | fine-tune the selected slider (step configurable) |
+| Left/Right arrows | fine-tune the selected slider (`FineTuneStep`, or that row's own step for the ones measured in cm/degrees) |
 | Shift+Left/Right | fine-tune by 10x that step |
 | 1–9 / Shift+1–9 | load / save preset slot (`TunerPresets.lua`) |
 | 0 / Shift+0 | bind / unbind current values to the worn outfit (`TunerOutfits.lua`) |
 | PassthroughKey (`F8`) | toggle native game input through to other mods (e.g. DekCNS hotkeys) while the panel is open |
+
+**Bust Height** and **Bust Weight** are the two sliders that are not size
+multipliers. Every other slider multiplies what the mod author already wrote
+into a bone, which can only ever make the bust bigger or smaller — the
+authored Translation on those nodes is `(0, 0, 0)`, and no multiplier over
+zero will move anything. These two add instead: Bust Height is a signed
+offset in centimetres (−8 … +8, 0 = untouched) that slides the bust up or
+down the chest, and Bust Weight is a signed tilt in degrees (−30 … +30) that
+tips it down from its root the way mass would, reading as sag rather than as
+a shorter chest. Both act on `B_Dm_L/R_Breast_Point`, the same pair the
+Breast size slider drives, and stack with it rather than fighting it. Their
+labels carry the unit so a `-2.50 cm` row doesn't read as a multiplier
+driven far out of range, and their arrow-key step is 0.1 cm / 0.5° rather
+than `FineTuneStep` (0.01 cm a press would be 800 presses to cross the
+range). Reset returns them to 0, not to 1.
+
+Both offsets are written in **component space**, which is what makes them
+mirror correctly: left and right move down for the same −Z and tip the same
+way for the same rotation, where a bone-space delta would send the two sides
+opposite ways. A ModifyBone node ignores a channel whose mode is `Ignore`,
+so the tuner switches Translation/Rotation to `Additive` while an offset is
+non-zero — but only where the author left that channel on `Ignore`, i.e.
+where there's nothing of theirs to trample; back at zero it restores the
+authored mode and space. Bust Height's axis isn't in doubt (component space
+is Z-up). Bust Weight's is: a droop is a rotation about the body's
+left-right axis, and whether that's component-space Y (Pitch) or X (Roll)
+depends on which way this skeleton's mesh faces in component space. Pitch is
+the assumption; if Bust Weight swings the bust sideways instead of tipping
+it down, change `axis = "pitch"` to `"roll"` in the `OFFSET` table — that
+exhausts the options, and Ctrl+R hot-reloads the file.
 
 The four girth sliders scale only the axes that make a limb thinner, not the
 length — the original groups scale all three axes and translation together,
@@ -104,8 +134,17 @@ paths (e.g. level load). Deliberately **not** a polling loop — a 1 s
   properties and reading `BoneToModify.BoneName`, so the script survives you
   adding/renaming nodes without a mapping update. Baselines are read from the
   **CDO**, not the instance (instances are polluted after Lua hot-reload).
+- Groups named in `OFFSET` opt out of that entirely: their slider value is a
+  delta added to the node's Translation or Rotation in centimetres or
+  degrees, neutral at 0.0, accumulated per bone alongside the multipliers so
+  a bone driven by both (the breast bones are) gets scaled and then moved.
+  They're skipped by the multiplier pass — running a slider that rests at
+  0.0 through it would multiply its bones' scale by zero.
 - Slider→bone grouping lives in the `GROUPS` table at the top of the tuner
-  script — trivially editable if you'd group them differently.
+  script — trivially editable if you'd group them differently. `RANGE`,
+  `NEUTRAL`, `STEP` and `UNIT` beside it decide how a row behaves in the
+  panel; a group listed in `RUNTIME_GROUPS` has no cooked widgets and gets
+  its row built and grafted in at load.
 
 ## UE4SS gotchas baked into the script (the hard-won stuff)
 
@@ -132,6 +171,10 @@ paths (e.g. level load). Deliberately **not** a polling loop — a 1 s
   CNS the panel still works with the invisible pointer.
 - On Lua hot-reload, stale widget instances are purged from the viewport
   before creating a new one.
+- `DumpBoneInventory` now also prints each node's `TransMode`/`RotMode`
+  alongside the spaces — which channels the ABP actually drives is exactly
+  what decides whether a translation or rotation written from Lua reaches
+  the pose at all.
 - Cloning a Slot's properties has to be read into plain Lua numbers and
   written back field-by-field (`slot.Padding.Top = ...`); assigning the
   whole struct, or trusting a `SetPadding`/`SetSize`-style setter call that
