@@ -31,7 +31,22 @@ offset in centimetres (−8 … +8, 0 = untouched) that slides the bust up or
 down the chest, and Bust Weight is a signed tilt in degrees (−30 … +30) that
 tips it down from its root the way mass would, reading as sag rather than as
 a shorter chest. Both act on `B_Dm_L/R_Breast_Point`, the same pair the
-Breast size slider drives, and stack with it rather than fighting it. Their
+Breast size slider drives, and stack with it rather than fighting it. Bust
+Height also drags the four `Pectro` bones — the upper attachment, what the
+Bust Top slider drives — along at 0.4 of its travel: moving `Breast_Point`
+alone slides the breast as a rigid lump while its root stays welded to the
+ribcage, which shows on the model, and letting the attachment follow part of
+the way softens it. Bust Weight deliberately does *not* rotate the Pectro
+bones — a droop pivots at the attachment, so tilting the attachment as well
+would swing the whole upper chest instead of letting the breast hang from
+it. The follow factor is `PECTRO_FOLLOW`, pure judgement and worth retuning
+by eye.
+
+**These two are a fine-tune, not a reposition.** They move the bust relative
+to a chest that stays put. Genuinely shifting it up the ribcage would mean
+compressing the collarbone-to-bust distance, which needs bones this ABP may
+not ship a `ModifyBone` node for at all — run `DumpBoneInventory` and look
+for `*** NO GROUP ***` before assuming it's reachable without a pak rebuild. Their
 labels carry the unit so a `-2.50 cm` row doesn't read as a multiplier
 driven far out of range, and their arrow-key step is 0.1 cm / 0.5° rather
 than `FineTuneStep` (0.01 cm a press would be 800 presses to cross the
@@ -138,6 +153,9 @@ paths (e.g. level load). Deliberately **not** a polling loop — a 1 s
   delta added to the node's Translation or Rotation in centimetres or
   degrees, neutral at 0.0, accumulated per bone alongside the multipliers so
   a bone driven by both (the breast bones are) gets scaled and then moved.
+  An optional `weights` table on the entry carries named bones a fraction of
+  the way instead of the full delta, which is how an attachment follows what
+  it's attached to.
   They're skipped by the multiplier pass — running a slider that rests at
   0.0 through it would multiply its bones' scale by zero.
 - Slider→bone grouping lives in the `GROUPS` table at the top of the tuner

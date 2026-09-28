@@ -21,7 +21,9 @@
 -- slider is an additive delta in centimetres or degrees (0.0 = untouched)
 -- rather than a multiplier, because "move it down" cannot be expressed as a
 -- multiplier over an authored Translation of zero. That is how Bust
--- Height/Weight work. Values persist to TunerValues.lua next to this script.
+-- Height/Weight work, and an offset group can carry some of its bones a
+-- fraction of the way (OFFSET's weights) so an attachment follows what it is
+-- attached to. Values persist to TunerValues.lua next to this script.
 --
 -- Keys while the panel is open:
 --   Up/Down arrows      move the selection (marked "> " in its label)
@@ -109,12 +111,27 @@ local ABP_CLASS_PATH = "/Game/Mods/EveProportions/ABP_EveProportions.ABP_EveProp
 local GROUPS = {
     Size = { "B_Root" }, -- whole body, feet stay grounded
     Breast = { "B_Dm_L_Breast_Point", "B_Dm_R_Breast_Point" },
-    -- Same two bones as Breast, but driven as additive offsets (see OFFSET):
+    -- Same bones as Breast, but driven as additive offsets (see OFFSET):
     -- Height slides them up/down the body, Weight tips them down from their
     -- root the way mass would, which reads as sag rather than as a shorter
     -- chest. Requested on the mod page ("breast height or weight ... so you
     -- can lower them"), which the size multipliers genuinely cannot do.
-    BustHeight = { "B_Dm_L_Breast_Point", "B_Dm_R_Breast_Point" },
+    --
+    -- Height also drags the Pectro bones -- the upper attachment, what the
+    -- Bust Top slider drives -- along at a fraction of the travel (see
+    -- OFFSET.BustHeight.weights). Moving Breast_Point alone slides the
+    -- breast as a rigid lump while its root stays welded to the ribcage,
+    -- which is visible on the model; letting the attachment follow part of
+    -- the way softens that. It does not make this a reposition tool -- a
+    -- real shift up the ribcage would mean compressing the collarbone-to-
+    -- bust distance, which needs bones this ABP may not even expose.
+    BustHeight = {
+        "B_Dm_L_Breast_Point", "B_Dm_R_Breast_Point",
+        "B_Ab_L_Pectro0", "B_Ab_L_Pectro1", "B_Ab_R_Pectro0", "B_Ab_R_Pectro1",
+    },
+    -- Weight deliberately does NOT list the Pectro bones: a droop pivots at
+    -- the attachment, so rotating the attachment too would tilt the whole
+    -- upper chest instead of letting the breast hang from it.
     BustWeight = { "B_Dm_L_Breast_Point", "B_Dm_R_Breast_Point" },
     -- Subtle: top-of-breast fullness only.
     FacBreast = { "B_Ab_L_Pectro0", "B_Ab_L_Pectro1", "B_Ab_R_Pectro0", "B_Ab_R_Pectro1" },
@@ -237,6 +254,10 @@ local SPACE_COMPONENT = 1
 --   axis     which field it lands on: x/y/z, or pitch/yaw/roll
 --   sign     applied to the slider value before it is written, so that a
 --            positive slider always means what its label says
+--   weights  optional per-bone factor on the delta, defaulting to 1.0, for
+--            a group that should carry some of its bones less far than the
+--            rest -- how an attachment follows part of the way rather than
+--            all of it or not at all
 --   space    EBoneControlSpace the delta is expressed in. Component space is
 --            the one that needs no mirroring -- both breast bones move down
 --            for the same -Z and tip the same way for the same rotation,
@@ -255,8 +276,19 @@ local SPACE_COMPONENT = 1
 -- this file. DumpBoneInventory prints each node's TransMode/RotMode, which
 -- is also worth a look: a channel already on Replace keeps the author's own
 -- space and the axis comment above may not apply to it.
+-- How far the upper attachment follows the bust, as a fraction of the Bust
+-- Height slider. Pure judgement, not derived from anything: 0 is the rigid
+-- lump this started as, 1 moves the whole chest and defeats the point. Worth
+-- retuning by eye -- Ctrl+R hot-reloads this file.
+local PECTRO_FOLLOW = 0.4
 local OFFSET = {
-    BustHeight = { channel = "translation", axis = "z", sign = 1.0, space = SPACE_COMPONENT },
+    BustHeight = {
+        channel = "translation", axis = "z", sign = 1.0, space = SPACE_COMPONENT,
+        weights = {
+            B_Ab_L_Pectro0 = PECTRO_FOLLOW, B_Ab_L_Pectro1 = PECTRO_FOLLOW,
+            B_Ab_R_Pectro0 = PECTRO_FOLLOW, B_Ab_R_Pectro1 = PECTRO_FOLLOW,
+        },
+    },
     -- Positive = heavier = tips down, so the sign flips UE's nose-up Pitch.
     BustWeight = { channel = "rotation", axis = "pitch", sign = -1.0, space = SPACE_COMPONENT },
 }
@@ -815,8 +847,13 @@ local function applyToInstance(inst, adopt)
     -- neutral multiplier entry, or the write loop below would skip it.
     local add = {}
     for group, cfg in pairs(OFFSET) do
-        local delta = (tonumber(settings[group]) or 0.0) * (cfg.sign or 1.0)
+        local full = (tonumber(settings[group]) or 0.0) * (cfg.sign or 1.0)
         for _, prop in ipairs(GROUPS[group] or {}) do
+            -- The nil guard is for the group having no weights table at
+            -- all (BustWeight does not); a weight of 0.0 survives the `or`
+            -- fine, since 0 is truthy in Lua.
+            local weight = cfg.weights ~= nil and cfg.weights[prop] or 1.0
+            local delta = full * weight
             local a = add[prop]
             if a == nil then
                 a = {
